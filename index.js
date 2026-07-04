@@ -7,71 +7,138 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
+// ----------------------
 // SUPABASE
+// ----------------------
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
+// ----------------------
 // SHOPIFY
+// ----------------------
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
 
-// store processed orders (prevents duplicates)
-const processed = new Set();
+// ----------------------
+// LOGGING
+// ----------------------
+console.log("🚀 Render bot started");
 
-console.log("🚀 Bot started");
+// ----------------------
+// CREATE SHOPIFY ORDER
+// ----------------------
+async function createShopifyOrder(variantId, customer) {
+  const res = await fetch(
+    `https://${SHOPIFY_STORE}/admin/api/2023-10/orders.json`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+      },
+      body: JSON.stringify({
+        order: {
+          line_items: [
+            {
+              variant_id: Number(variantId),
+              quantity: 1,
+            },
+          ],
+          financial_status: "paid",
+          customer: {
+            email: customer.email,
+            first_name: customer.name,
+          },
+        },
+      }),
+    }
+  );
 
-// -------------------------------
-// 1. SHOPIFY WEBHOOK ENDPOINT
-// -------------------------------
-app.post("/webhook/orders", async (req, res) => {
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
+  }
+
+  return res.json();
+}
+
+// ----------------------
+// PROCESS QUEUE
+// ----------------------
+async function processQueue() {
   try {
-    const order = req.body;
+    const { data: orders, error } = await supabase
+      .from("dsers_queue")
+      .select("*")
+      .eq("status", "pending");
 
-    if (!order || processed.has(order.id)) {
-      return res.sendStatus(200);
+    if (error) {
+      console.log("DB error:", error);
+      return;
     }
 
-    processed.add(order.id);
+    if (!orders || orders.length === 0) {
+      console.log("⏳ No pending orders");
+      return;
+    }
 
-    console.log("🔥 NEW SHOPIFY ORDER");
-    console.log("ID:", order.id);
-    console.log("Email:", order.email);
+    console.log(`📦 Found ${orders.length} pending orders`);
 
-    const item = order.line_items?.[0];
+    for (const order of orders) {
+      try {
+        console.log("➡ Processing:", order.id);
 
-    // SAVE TO SUPABASE
-    await supabase.from("orders").insert([
-      {
-        id: order.id,
-        customer_name: order.customer?.first_name || "",
-        email: order.email,
-        product: item?.title,
-        price: order.total_price,
-        status: "paid"
+        if (!order.shopify_variant_id) {
+          console.log("❌ Missing variant ID");
+          continue;
+        }
+
+        const shopifyOrder = await createShopifyOrder(
+          order.shopify_variant_id,
+          {
+            email: order.email,
+            name: order.customer_name,
+          }
+        );
+
+        await supabase
+          .from("dsers_queue")
+          .update({
+            status: "sent_to_shopify",
+            shopify_order_id: shopifyOrder.order.id,
+          })
+          .eq("id", order.id);
+
+        console.log("✅ Sent to Shopify:", order.id);
+      } catch (err) {
+        console.log("❌ Order failed:", order.id, err.message);
       }
-    ]);
-
-    console.log("✅ Saved to Supabase");
-
-    res.sendStatus(200);
+    }
   } catch (err) {
-    console.log("Webhook error:", err.message);
-    res.sendStatus(500);
+    console.log("Process error:", err.message);
   }
-});
+}
 
-// -------------------------------
-// 2. TEST ROUTE
-// -------------------------------
+// ----------------------
+// RUN EVERY 20 SECONDS
+// ----------------------
+setInterval(processQueue, 20000);
+
+// also run immediately on startup
+processQueue();
+
+// ----------------------
+// HEALTH CHECK
+// ----------------------
 app.get("/", (req, res) => {
-  res.send("Order bot is running 🚀");
+  res.send("Render bot running 🚀");
 });
 
-// -------------------------------
-// 3. START SERVER
-// -------------------------------
+// ----------------------
+// START SERVER
+// ----------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
