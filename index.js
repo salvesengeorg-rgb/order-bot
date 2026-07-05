@@ -27,8 +27,6 @@ console.log("🚀 Bot started");
 // SHOPIFY ORDER
 // ----------------------
 async function createShopifyOrder(variantId, customer) {
-  console.log("🛒 Creating Shopify order with variant:", variantId);
-
   const res = await fetch(
     `https://${SHOPIFY_STORE}/admin/api/2023-10/orders.json`,
     {
@@ -47,26 +45,26 @@ async function createShopifyOrder(variantId, customer) {
           ],
           financial_status: "paid",
           customer: {
-            email: customer.email,
-            first_name: customer.name,
+            email: customer.email ?? "no-email@example.com",
+            first_name: customer.name ?? "Customer",
           },
         },
       }),
     }
   );
 
-  const text = await res.text();
+  const data = await res.json().catch(() => null);
 
   if (!res.ok) {
-    console.log("❌ Shopify error:", text);
-    throw new Error(text);
+    console.log("❌ Shopify error:", data);
+    throw new Error(JSON.stringify(data));
   }
 
-  return JSON.parse(text);
+  return data;
 }
 
 // ----------------------
-// QUEUE PROCESSOR
+// PROCESS QUEUE
 // ----------------------
 async function processQueue() {
   const { data: orders, error } = await supabase
@@ -88,12 +86,18 @@ async function processQueue() {
 
   for (const order of orders) {
     try {
-      console.log("➡ Processing order:", order.id);
+      // ----------------------
+      // LOCK ORDER (IMPORTANT FIX)
+      // ----------------------
+      await supabase
+        .from("dsers_queue")
+        .update({ status: "processing" })
+        .eq("id", order.id);
 
-      console.log("📦 Variant ID:", order.shopify_variant_id);
+      console.log("➡ Processing:", order.id);
 
-      if (!order.shopify_variant_id || order.shopify_variant_id === "null") {
-        console.log("❌ Missing variant ID → skipping");
+      if (!order.shopify_variant_id) {
+        console.log("❌ Missing variant ID");
         continue;
       }
 
@@ -109,13 +113,18 @@ async function processQueue() {
         .from("dsers_queue")
         .update({
           status: "sent_to_shopify",
-          shopify_order_id: shopifyOrder.order.id,
+          shopify_order_id: shopifyOrder.order?.id,
         })
         .eq("id", order.id);
 
       console.log("✅ DONE:", order.id);
     } catch (err) {
       console.log("❌ FAILED:", order.id, err.message);
+
+      await supabase
+        .from("dsers_queue")
+        .update({ status: "failed" })
+        .eq("id", order.id);
     }
   }
 }
