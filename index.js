@@ -18,45 +18,47 @@ const supabase = createClient(
 // ----------------------
 // SHOPIFY
 // ----------------------
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
-const SHOPIFY_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
+const SHOPIFY_STORE = "order-bot-nrgkfb8z.myshopify.com";
 
-console.log("🚀 Bot started");
+// REPLACE THIS WITH YOUR ADMIN API ACCESS TOKEN
+const SHOPIFY_ADMIN_API = "PASTE_YOUR_ADMIN_API_ACCESS_TOKEN_HERE";
+
+console.log("🚀 Order Bot Started");
 
 // ----------------------
-// SHOPIFY ORDER
+// CREATE SHOPIFY ORDER
 // ----------------------
 async function createShopifyOrder(variantId, customer) {
-  const res = await fetch(
-    `https://${SHOPIFY_STORE}/admin/api/2023-10/orders.json`,
+  const response = await fetch(
+    `https://${SHOPIFY_STORE}/admin/api/2025-07/orders.json`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_API,
       },
       body: JSON.stringify({
         order: {
+          financial_status: "paid",
           line_items: [
             {
               variant_id: Number(variantId),
               quantity: 1,
             },
           ],
-          financial_status: "paid",
           customer: {
-            email: customer.email ?? "no-email@example.com",
-            first_name: customer.name ?? "Customer",
+            first_name: customer.name || "Customer",
+            email: customer.email || "customer@example.com",
           },
         },
       }),
     }
   );
 
-  const data = await res.json().catch(() => null);
+  const data = await response.json().catch(() => ({}));
 
-  if (!res.ok) {
-    console.log("❌ Shopify error:", data);
+  if (!response.ok) {
+    console.error("❌ Shopify Error:", data);
     throw new Error(JSON.stringify(data));
   }
 
@@ -73,7 +75,7 @@ async function processQueue() {
     .eq("status", "pending");
 
   if (error) {
-    console.log("DB error:", error);
+    console.log("Supabase Error:", error);
     return;
   }
 
@@ -82,26 +84,22 @@ async function processQueue() {
     return;
   }
 
-  console.log(`📦 ${orders.length} pending orders`);
+  console.log(`📦 Found ${orders.length} pending orders`);
 
   for (const order of orders) {
     try {
-      // ----------------------
-      // LOCK ORDER (IMPORTANT FIX)
-      // ----------------------
       await supabase
         .from("dsers_queue")
         .update({ status: "processing" })
         .eq("id", order.id);
 
-      console.log("➡ Processing:", order.id);
+      console.log("➡ Processing Order:", order.id);
 
       if (!order.shopify_variant_id) {
-        console.log("❌ Missing variant ID");
-        continue;
+        throw new Error("Missing Shopify Variant ID");
       }
 
-      const shopifyOrder = await createShopifyOrder(
+      const result = await createShopifyOrder(
         order.shopify_variant_id,
         {
           email: order.email,
@@ -113,13 +111,14 @@ async function processQueue() {
         .from("dsers_queue")
         .update({
           status: "sent_to_shopify",
-          shopify_order_id: shopifyOrder.order?.id,
+          shopify_order_id: result.order.id,
         })
         .eq("id", order.id);
 
-      console.log("✅ DONE:", order.id);
+      console.log("✅ Order Sent:", result.order.id);
+
     } catch (err) {
-      console.log("❌ FAILED:", order.id, err.message);
+      console.log("❌ Failed:", err.message);
 
       await supabase
         .from("dsers_queue")
@@ -130,14 +129,20 @@ async function processQueue() {
 }
 
 // ----------------------
+// START LOOP
+// ----------------------
 setInterval(processQueue, 15000);
 processQueue();
 
 // ----------------------
+// SERVER
+// ----------------------
 app.get("/", (req, res) => {
-  res.send("Bot running 🚀");
+  res.send("Order Bot Running 🚀");
 });
 
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Server started");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
